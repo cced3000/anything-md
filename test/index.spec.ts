@@ -308,4 +308,39 @@ describe('Anything-MD worker', () => {
       }),
     ]);
   });
+
+  it('keeps legacy .xls files as xls when the server returns application/octet-stream', async () => {
+    const legacyXls = new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0x00]);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        return new Response(legacyXls, {
+          status: 200,
+          headers: {
+            'content-type': 'application/octet-stream',
+          },
+        });
+      }) as typeof fetch,
+    );
+
+    const request = new Request('https://example.com/?url=https://target.example/table.xls&key=test-key');
+    const ctx = createContext();
+    const env = createEnv();
+    const response = await worker.fetch(request, env, ctx);
+    const data = (await response.json()) as {
+      markdown: string;
+      name: string;
+      success: boolean;
+    };
+
+    expect(response.status).toBe(200);
+    expect(data.success).toBe(true);
+    expect(data.name).toBe('table.xls');
+    expect(env.AI.toMarkdown).toHaveBeenCalledWith([
+      expect.objectContaining({
+        name: 'table.xls',
+      }),
+    ]);
+  });
 });

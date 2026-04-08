@@ -22,11 +22,16 @@ type SupportedFormatsSnapshot = {
 };
 
 const PDF_MAGIC = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
-const LEGACY_DOC_MAGIC = new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+const CFBF_MAGIC = new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
 
 const MIME_TO_EXTENSION: Record<string, string> = {
   'application/msword': 'doc',
   'application/pdf': 'pdf',
+  'application/vnd.ms-excel': 'xls',
+  'application/vnd.ms-powerpoint': 'ppt',
+  'application/vnd.ms-word.document.macroenabled.12': 'docm',
+  'application/vnd.ms-excel.sheet.binary.macroenabled.12': 'xlsb',
+  'application/vnd.ms-excel.sheet.macroenabled.12': 'xlsm',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
   'application/xml': 'xml',
@@ -67,6 +72,12 @@ function ensureExtension(fileName: string, extension: string): string {
   return `${fileName}.${extension}`.replace(/\.\./g, '.');
 }
 
+const LEGACY_CFBF_EXTENSION_TO_MIME: Record<string, string> = {
+  doc: 'application/msword',
+  xls: 'application/vnd.ms-excel',
+  ppt: 'application/vnd.ms-powerpoint',
+};
+
 function hasMagic(body: ArrayBuffer, magic: Uint8Array): boolean {
   const bytes = new Uint8Array(body);
   if (bytes.byteLength < magic.byteLength) return false;
@@ -79,13 +90,14 @@ function hasMagic(body: ArrayBuffer, magic: Uint8Array): boolean {
 function isLegacyDoc(input: MarkdownInput): boolean {
   const contentType = normalizeContentType(input.contentType);
   const extension = extensionOf(input.fileName);
-  return contentType === 'application/msword' || extension === 'doc' || hasMagic(input.body, LEGACY_DOC_MAGIC);
+  return contentType === 'application/msword' || extension === 'doc';
 }
 
 function normalizeBinaryInput(input: MarkdownInput): MarkdownInput {
   let { body, contentType, fileName } = input;
   contentType = normalizeContentType(contentType);
   fileName = fileName || 'content';
+  const currentExtension = extensionOf(fileName);
 
   if (hasMagic(body, PDF_MAGIC)) {
     return {
@@ -95,15 +107,24 @@ function normalizeBinaryInput(input: MarkdownInput): MarkdownInput {
     };
   }
 
-  if (hasMagic(body, LEGACY_DOC_MAGIC)) {
-    return {
-      body,
-      contentType: 'application/msword',
-      fileName: ensureExtension(fileName, 'doc'),
-    };
+  if (hasMagic(body, CFBF_MAGIC)) {
+    if (currentExtension && currentExtension in LEGACY_CFBF_EXTENSION_TO_MIME) {
+      return {
+        body,
+        contentType: LEGACY_CFBF_EXTENSION_TO_MIME[currentExtension],
+        fileName: ensureExtension(fileName, MIME_TO_EXTENSION[LEGACY_CFBF_EXTENSION_TO_MIME[currentExtension]]),
+      };
+    }
+
+    if (contentType in MIME_TO_EXTENSION) {
+      return {
+        body,
+        contentType,
+        fileName: ensureExtension(fileName, MIME_TO_EXTENSION[contentType]),
+      };
+    }
   }
 
-  const currentExtension = extensionOf(fileName);
   if (contentType in MIME_TO_EXTENSION && (!currentExtension || GENERIC_EXTENSIONS.has(currentExtension))) {
     fileName = ensureExtension(fileName, MIME_TO_EXTENSION[contentType]);
   } else if (currentExtension && currentExtension in EXTENSION_TO_MIME && contentType === 'application/octet-stream') {
