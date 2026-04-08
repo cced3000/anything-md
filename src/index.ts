@@ -5,27 +5,30 @@
  * to Markdown via the Workers AI toMarkdown binding.
  *
  * API:
- *   GET  /?url=https://example.com
- *   POST / { "url": "https://example.com" }
- *   POST / { "content": "<html>...</html>", "contentType": "text/html", "fileName": "page.html" }
+ *   GET  /?url=https://example.com&key=your-key
+ *   POST / + X-API-Key: your-key { "url": "https://example.com" }
+ *   POST / + X-API-Key: your-key { "content": "<html>...</html>", "contentType": "text/html", "fileName": "page.html" }
  *
  * Response: { success, url, name, mimeType, tokens, markdown }
  */
 
-import { fetchMaxAttempts, fetchTimeout } from './config';
-import { errorResponse, handlePreflight, jsonResponse, textResponse } from './cors';
+import { authorizeRequest, hasConfiguredApiKeys } from './auth';
+import { apiKeyAuditLogEnabled, apiKeys, fetchMaxAttempts, fetchTimeout } from './config';
+import { errorResponse, handlePreflight, htmlResponse, jsonResponse, textResponse } from './cors';
+import { DocumentPreparationError, prepareMarkdownInput } from './document';
 import { robustFetch } from './fetch';
 import { extractTitle, extractWeChatContent, isWeChatArticle, preprocessHtml } from './html';
 import { collectImageUrls, rewriteImageUrls, uploadImages } from './r2';
+import { renderHomePage } from './ui';
 
 /** Derive a filename from a URL path */
 function getFileName(url: string): string {
   try {
     const segment = new URL(url).pathname.split('/').filter(Boolean).pop();
     if (segment?.includes('.')) return segment;
-    return segment ? `${segment}.html` : 'page.html';
+    return segment || 'content';
   } catch {
-    return 'page.html';
+    return 'content';
   }
 }
 
@@ -36,9 +39,47 @@ function isHtmlContent(contentType: string): boolean {
 
 export default {
   async fetch(request, env, ctx): Promise<Response> {
+    const url = new URL(request.url);
+
     // CORS preflight
     if (request.method === 'OPTIONS') {
       return handlePreflight(env);
+    }
+
+    if (request.method === 'GET' && url.pathname === '/health') {
+      return jsonResponse(env, {
+        success: true,
+        status: 'ok',
+        authConfigured: hasConfiguredApiKeys(env),
+        keyAuthEnabled: apiKeys(env).length > 0,
+        auditLogEnabled: apiKeyAuditLogEnabled(env),
+      });
+    }
+
+    if (url.pathname !== '/') {
+      return errorResponse(env, 'Not found.', 404);
+    }
+
+    const isHomePageRequest = request.method === 'GET' && !url.searchParams.has('url');
+    if (isHomePageRequest) {
+      return htmlResponse(
+        env,
+        renderHomePage({
+          apiEndpoint: `${url.origin}/`,
+          authConfigured: hasConfiguredApiKeys(env),
+        }),
+        200,
+        { 'Cache-Control': 'no-store' },
+      );
+    }
+
+    if (request.method !== 'GET' && request.method !== 'POST') {
+      return errorResponse(env, 'Method not allowed. Use GET or POST.', 405);
+    }
+
+    const auth = await authorizeRequest(request, env);
+    if (!auth.ok) {
+      return errorResponse(env, auth.message, auth.status);
     }
 
     // --- Parse request parameters ---
@@ -49,7 +90,7 @@ export default {
     let rawFormat = false;
 
     if (request.method === 'GET') {
-      const params = new URL(request.url).searchParams;
+      const params = url.searchParams;
       targetUrl = params.get('url');
       rawFormat = params.get('format') === 'raw';
     } else if (request.method === 'POST') {
@@ -69,10 +110,11 @@ export default {
         directFileName = body.fileName ?? null;
         rawFormat = body.format === 'raw';
       } catch {
-        return errorResponse(env, 'Invalid JSON body. Expected: { "url": "https://..." } or { "content": "..." }');
+        return errorResponse(
+          env,
+          'Invalid JSON body. Expected: { "url": "https://..." } or { "content": "...", "contentType": "text/html" }',
+        );
       }
-    } else {
-      return errorResponse(env, 'Method not allowed. Use GET or POST.', 405);
     }
 
     // No URL or content provided — return usage info
@@ -80,11 +122,13 @@ export default {
       return jsonResponse(env, {
         success: true,
         message: 'Anything-MD API — Convert any URL or content to Markdown',
+        auth: 'GET uses ?key=... and POST uses X-API-Key.',
         usage: {
-          GET: '/?url=https://example.com',
-          POST_URL: '{ "url": "https://example.com" }',
-          POST_CONTENT: '{ "content": "<html>...</html>", "contentType": "text/html", "fileName": "page.html" }',
-          POST_HTML: '{ "html": "<html>...</html>" }',
+          GET: '/?url=https://example.com&key=your-key',
+          POST_URL: 'POST / + X-API-Key: your-key { "url": "https://example.com" }',
+          POST_CONTENT:
+            'POST / + X-API-Key: your-key { "content": "<html>...</html>", "contentType": "text/html", "fileName": "page.html" }',
+          POST_HTML: 'POST / + X-API-Key: your-key { "html": "<html>...</html>" }',
         },
       });
     }
@@ -168,6 +212,8 @@ export default {
         return errorResponse(env, 'No URL or content provided.');
       }
 
+      ({ body, contentType, fileName } = await prepareMarkdownInput({ body, contentType, fileName }, env));
+
       // Convert to Markdown via Workers AI
       const results = await env.AI.toMarkdown([
         {
@@ -214,6 +260,10 @@ export default {
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error';
+      if (err instanceof DocumentPreparationError) {
+        return errorResponse(env, message, err.status);
+      }
+
       return errorResponse(env, `Internal error: ${message}`, 500);
     }
   },

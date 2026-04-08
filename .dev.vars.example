@@ -4,6 +4,14 @@
 # These override wrangler.jsonc vars during local development.
 # ============================================================
 
+# API keys allowed to call the conversion API
+# Comma-separated. Requests send one key via ?key=... or X-API-Key.
+# Leave blank only if you intentionally want the API disabled.
+API_KEYS=change-me
+
+# Optional auth audit logging toggle: true/false
+API_KEY_AUDIT_LOG=true
+
 # R2 bucket public URL (custom domain or r2.dev subdomain)
 R2_PUBLIC_URL=https://your-bucket.your-domain.com
 
@@ -26,6 +34,19 @@ FETCH_TIMEOUT_MS=15000
 # Max fetch retry attempts
 # Default: 3
 FETCH_MAX_ATTEMPTS=3
+
+# Optional converter URL for legacy .doc files
+# Anything-MD will call this endpoint with multipart/form-data and expect
+# a converted .docx, HTML, or PDF response body.
+DOCUMENT_CONVERTER_URL=https://doc.yekyos.com/convert
+
+# Optional bearer token for the converter
+# Prefer storing this as a Wrangler secret in production.
+DOCUMENT_CONVERTER_TOKEN=
+
+# Converter request timeout (milliseconds)
+# Default: 30000
+DOCUMENT_CONVERTER_TIMEOUT_MS=30000
 
 # CORS Access-Control-Allow-Origin header
 # Use "*" to allow all origins, or a specific origin like "https://your-app.com"
