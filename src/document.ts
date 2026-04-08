@@ -6,6 +6,8 @@ export interface MarkdownInput {
   fileName: string;
 }
 
+export type DocumentConverterTarget = 'docx' | 'html' | 'pdf';
+
 export class DocumentPreparationError extends Error {
   status: number;
 
@@ -29,6 +31,7 @@ const MIME_TO_EXTENSION: Record<string, string> = {
   'application/pdf': 'pdf',
   'application/vnd.ms-excel': 'xls',
   'application/vnd.ms-powerpoint': 'ppt',
+  'application/vnd.ms-works': 'wps',
   'application/vnd.ms-word.document.macroenabled.12': 'docm',
   'application/vnd.ms-excel.sheet.binary.macroenabled.12': 'xlsb',
   'application/vnd.ms-excel.sheet.macroenabled.12': 'xlsm',
@@ -76,6 +79,7 @@ const LEGACY_CFBF_EXTENSION_TO_MIME: Record<string, string> = {
   doc: 'application/msword',
   xls: 'application/vnd.ms-excel',
   ppt: 'application/vnd.ms-powerpoint',
+  wps: 'application/vnd.ms-works',
 };
 
 function hasMagic(body: ArrayBuffer, magic: Uint8Array): boolean {
@@ -91,6 +95,12 @@ function isLegacyDoc(input: MarkdownInput): boolean {
   const contentType = normalizeContentType(input.contentType);
   const extension = extensionOf(input.fileName);
   return contentType === 'application/msword' || extension === 'doc';
+}
+
+function isLegacyWps(input: MarkdownInput): boolean {
+  const contentType = normalizeContentType(input.contentType);
+  const extension = extensionOf(input.fileName);
+  return contentType === 'application/vnd.ms-works' || extension === 'wps';
 }
 
 function normalizeBinaryInput(input: MarkdownInput): MarkdownInput {
@@ -183,20 +193,21 @@ function inferConvertedOutput(input: MarkdownInput, response: Response, body: Ar
   };
 }
 
-async function convertLegacyDoc(input: MarkdownInput, env: Env): Promise<MarkdownInput> {
+export async function convertWithDocumentConverter(
+  input: MarkdownInput,
+  env: Env,
+  targetFormat: DocumentConverterTarget,
+): Promise<MarkdownInput> {
   const converterUrl = documentConverterUrl(env);
   if (!converterUrl) {
-    throw new DocumentPreparationError(
-      'Legacy .doc files require DOCUMENT_CONVERTER_URL because Workers AI toMarkdown does not natively support application/msword.',
-      415,
-    );
+    throw new DocumentPreparationError(`Document conversion to ${targetFormat} requires DOCUMENT_CONVERTER_URL.`, 415);
   }
 
   const form = new FormData();
   form.set('file', new File([input.body], input.fileName, { type: input.contentType }));
   form.set('sourceFileName', input.fileName);
   form.set('sourceMimeType', input.contentType);
-  form.set('targetFormat', 'docx');
+  form.set('targetFormat', targetFormat);
 
   const headers = new Headers();
   const token = documentConverterToken(env);
@@ -224,8 +235,16 @@ async function convertLegacyDoc(input: MarkdownInput, env: Env): Promise<Markdow
   return inferConvertedOutput(input, response, await response.arrayBuffer());
 }
 
+async function convertLegacyDoc(input: MarkdownInput, env: Env): Promise<MarkdownInput> {
+  return convertWithDocumentConverter(input, env, 'docx');
+}
+
 export async function prepareMarkdownInput(input: MarkdownInput, env: Env): Promise<MarkdownInput> {
   const normalized = normalizeBinaryInput(input);
+  if (isLegacyWps(normalized)) {
+    return convertWithDocumentConverter(normalized, env, 'html');
+  }
+
   if (!isLegacyDoc(normalized)) return normalized;
 
   const supportedFormats = await getSupportedFormats(env);

@@ -15,7 +15,7 @@
 import { authorizeRequest, hasConfiguredApiKeys } from './auth';
 import { apiKeyAuditLogEnabled, apiKeys, fetchMaxAttempts, fetchTimeout } from './config';
 import { errorResponse, handlePreflight, htmlResponse, jsonResponse, textResponse } from './cors';
-import { DocumentPreparationError, prepareMarkdownInput } from './document';
+import { convertWithDocumentConverter, DocumentPreparationError, prepareMarkdownInput } from './document';
 import { robustFetch } from './fetch';
 import { extractTitle, extractWeChatContent, isWeChatArticle, preprocessHtml } from './html';
 import { collectImageUrls, rewriteImageUrls, uploadImages } from './r2';
@@ -35,6 +35,40 @@ function getFileName(url: string): string {
 /** Determine whether the content type is HTML */
 function isHtmlContent(contentType: string): boolean {
   return contentType.includes('text/html') || contentType.includes('application/xhtml');
+}
+
+function isPdfContent(contentType: string): boolean {
+  return contentType.includes('application/pdf');
+}
+
+async function convertToMarkdown(
+  env: Env,
+  body: ArrayBuffer,
+  contentType: string,
+  fileName: string,
+): Promise<{ data: string; mimeType: string; name: string; tokens: number }> {
+  const results = await env.AI.toMarkdown([
+    {
+      name: fileName,
+      blob: new Blob([body], { type: contentType }),
+    },
+  ]);
+
+  const conversion = results[0];
+  if (!conversion) {
+    throw new Error('Markdown conversion returned no result.');
+  }
+
+  if (conversion.format === 'error') {
+    throw new Error(conversion.error);
+  }
+
+  return {
+    data: conversion.data ?? '',
+    mimeType: conversion.mimeType,
+    name: conversion.name,
+    tokens: conversion.tokens,
+  };
 }
 
 export default {
@@ -146,6 +180,7 @@ export default {
       let body: ArrayBuffer;
       let contentType: string;
       let fileName: string;
+      let fallbackReason: string | null = null;
 
       // Branch 1: Direct content provided
       if (directContent) {
@@ -215,17 +250,30 @@ export default {
       ({ body, contentType, fileName } = await prepareMarkdownInput({ body, contentType, fileName }, env));
 
       // Convert to Markdown via Workers AI
-      const results = await env.AI.toMarkdown([
-        {
+      let result: {
+        data: string;
+        mimeType: string;
+        name: string;
+        tokens: number;
+      };
+
+      try {
+        result = await convertToMarkdown(env, body, contentType, fileName);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!isPdfContent(contentType)) {
+          return errorResponse(env, `Conversion failed: ${message}`, 422);
+        }
+
+        fallbackReason = message;
+        const converted = await convertWithDocumentConverter({ body, contentType, fileName }, env, 'html');
+        const fallbackResult = await convertToMarkdown(env, converted.body, converted.contentType, converted.fileName);
+        result = {
+          data: fallbackResult.data,
+          mimeType: contentType,
           name: fileName,
-          blob: new Blob([body], { type: contentType }),
-        },
-      ]);
-
-      const result = results[0];
-
-      if (result.format === 'error') {
-        return errorResponse(env, `Conversion failed: ${result.error}`, 422);
+          tokens: fallbackResult.tokens,
+        };
       }
 
       let markdown = result.data ?? '';
@@ -256,6 +304,12 @@ export default {
         name: result.name,
         mimeType: result.mimeType,
         tokens: result.tokens,
+        fallback: fallbackReason
+          ? {
+              mode: 'pdf-html',
+              reason: fallbackReason,
+            }
+          : undefined,
         markdown,
       });
     } catch (err: unknown) {

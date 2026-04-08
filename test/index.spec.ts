@@ -343,4 +343,106 @@ describe('Anything-MD worker', () => {
       }),
     ]);
   });
+
+  it('routes .wps files through the document converter before markdown conversion', async () => {
+    const legacyWps = new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0x00]);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === 'https://converter.example/convert') {
+          return new Response('<html><body><h1>Recovered WPS</h1><p>Converted from converter</p></body></html>', {
+            status: 200,
+            headers: {
+              'content-type': 'text/html; charset=utf-8',
+            },
+          });
+        }
+
+        return new Response(legacyWps, {
+          status: 200,
+          headers: {
+            'content-type': 'application/octet-stream',
+          },
+        });
+      }) as typeof fetch,
+    );
+
+    const request = new Request('https://example.com/?url=https://target.example/file.wps&key=test-key');
+    const ctx = createContext();
+    const env = createEnv({
+      DOCUMENT_CONVERTER_URL: 'https://converter.example/convert',
+      DOCUMENT_CONVERTER_TIMEOUT_MS: '10000',
+    } as Partial<Env>);
+    const response = await worker.fetch(request, env, ctx);
+    const data = (await response.json()) as {
+      markdown: string;
+      name: string;
+      success: boolean;
+    };
+
+    expect(response.status).toBe(200);
+    expect(data.success).toBe(true);
+    expect(data.name).toBe('file.html');
+    expect(data.markdown).toContain('# Converted');
+    expect(env.AI.toMarkdown).toHaveBeenCalledWith([
+      expect.objectContaining({
+        name: 'file.html',
+      }),
+    ]);
+  });
+
+  it('falls back to converter-backed HTML extraction when Workers AI throws on a pdf', async () => {
+    const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37]);
+    const configuredEnv = createEnv({
+      DOCUMENT_CONVERTER_URL: 'https://converter.example/convert',
+      DOCUMENT_CONVERTER_TIMEOUT_MS: '10000',
+    } as Partial<Env>);
+    vi.mocked(configuredEnv.AI.toMarkdown).mockRejectedValueOnce(new Error('Unexpected end of JSON input'));
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === 'https://converter.example/convert') {
+          return new Response('<html><body><h1>Recovered</h1><p>Recovered PDF fallback</p></body></html>', {
+            status: 200,
+            headers: {
+              'content-type': 'text/html; charset=utf-8',
+            },
+          });
+        }
+
+        return new Response(pdfBytes, {
+          status: 200,
+          headers: {
+            'content-type': 'application/pdf',
+          },
+        });
+      }) as typeof fetch,
+    );
+
+    const request = new Request('https://example.com/?url=https://target.example/broken.pdf&key=test-key');
+    const ctx = createContext();
+    const response = await worker.fetch(request, configuredEnv, ctx);
+    const data = (await response.json()) as {
+      fallback?: { mode: string; reason: string };
+      markdown: string;
+      name: string;
+      success: boolean;
+      tokens: number;
+    };
+
+    expect(response.status).toBe(200);
+    expect(data.success).toBe(true);
+    expect(data.name).toBe('broken.pdf');
+    expect(data.tokens).toBe(24);
+    expect(data.markdown).toContain('# Converted');
+    expect(data.fallback).toEqual({
+      mode: 'pdf-html',
+      reason: 'Unexpected end of JSON input',
+    });
+    expect(configuredEnv.AI.toMarkdown).toHaveBeenCalledTimes(2);
+  });
 });

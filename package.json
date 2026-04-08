@@ -8,6 +8,7 @@
     "start": "wrangler dev",
     "test": "vitest",
     "cf-typegen": "wrangler types",
+    "token:generate": "node scripts/generate-api-token.mjs",
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome lint --write .",
