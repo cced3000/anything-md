@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
+import { sanitizeNfraDocClob } from '../src/nfra';
 
 function createEnv(overrides: Partial<Env> = {}): Env {
   const toMarkdown = Object.assign(
@@ -140,6 +141,70 @@ describe('Anything-MD worker', () => {
     expect(data.url).toBe('https://target.example/article');
     expect(data.name).toBe('Hello.html');
     expect(data.markdown).toContain('# Converted');
+  });
+
+  it('resolves NFRA detail pages through the JSON detail API instead of raw Angular templates', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/cbircweb/DocInfo/SelectByDocId?docId=1253746')) {
+          return new Response(
+            JSON.stringify({
+              rptCode: 200,
+              data: {
+                docTitle: '国家金融监督管理总局鸡西监管分局行政处罚信息公开表',
+                publishDate: '2026-04-07 16:20:00',
+                docSource: '黑龙江',
+                docClob:
+                  '<html><head><meta charset="gb2312"><style>.x{mso-style-name:正文}</style></head><body><!--comment--><xml>ignored</xml><p class="MsoNormal" style="mso-style-name:正文"><span lang="zh-CN">这里是正文内容</span></p><table style="width:100%"><tbody><tr><td style="color:red">表格</td></tr></tbody></table></body></html>',
+                attachmentInfoVOList: [],
+              },
+            }),
+            {
+              status: 200,
+              headers: { 'content-type': 'application/json; charset=utf-8' },
+            },
+          );
+        }
+
+        return new Response('unexpected fetch', { status: 500 });
+      }) as typeof fetch,
+    );
+
+    const request = new Request(
+      `https://example.com/?url=${encodeURIComponent('https://www.nfra.gov.cn/cn/view/pages/ItemDetail.html?docId=1253746&itemId=4293&generaltype=0')}&key=test-key`,
+    );
+    const ctx = createContext();
+    const env = createEnv();
+    const response = await worker.fetch(request, env, ctx);
+    const data = (await response.json()) as {
+      markdown: string;
+      name: string;
+      success: boolean;
+    };
+
+    expect(response.status).toBe(200);
+    expect(data.success).toBe(true);
+    expect(data.name).toBe('国家金融监督管理总局鸡西监管分局行政处罚信息公开表.html');
+    expect(env.AI.toMarkdown).toHaveBeenCalledWith([
+      expect.objectContaining({
+        name: '国家金融监督管理总局鸡西监管分局行政处罚信息公开表.html',
+      }),
+    ]);
+  });
+
+  it('sanitizes NFRA docClob before markdown conversion', () => {
+    const cleaned = sanitizeNfraDocClob(
+      '<html><head><meta charset="gb2312"><style>.x{mso-style-name:正文}</style></head><body><!--comment--><xml>ignored</xml><p class="MsoNormal" style="mso-style-name:正文"><span lang="zh-CN">这里是正文内容</span></p><table style="width:100%"><tbody><tr><td style="color:red">表格</td></tr></tbody></table></body></html>',
+    );
+
+    expect(cleaned).toContain('<p>这里是正文内容</p>');
+    expect(cleaned).toContain('<table><tr><td>表格</td></tr></table>');
+    expect(cleaned).not.toContain('<style>');
+    expect(cleaned).not.toContain('mso-');
+    expect(cleaned).not.toContain('<xml>');
+    expect(cleaned).not.toContain('<head>');
   });
 
   it('converts direct content with a valid X-API-Key header', async () => {

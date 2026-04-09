@@ -18,6 +18,7 @@ import { errorResponse, handlePreflight, htmlResponse, jsonResponse, textRespons
 import { convertWithDocumentConverter, DocumentPreparationError, prepareMarkdownInput } from './document';
 import { robustFetch } from './fetch';
 import { extractTitle, extractWeChatContent, isWeChatArticle, preprocessHtml } from './html';
+import { resolveNfraContent } from './nfra';
 import { collectImageUrls, rewriteImageUrls, uploadImages } from './r2';
 import { renderHomePage } from './ui';
 
@@ -212,18 +213,23 @@ export default {
       }
       // Branch 2: Fetch from URL
       else if (targetUrl) {
-        const response = await robustFetch(targetUrl, {
-          timeout: fetchTimeout(env),
-          maxAttempts: fetchMaxAttempts(env),
-        });
+        const resolvedNfraContent = await resolveNfraContent(targetUrl);
+        if (resolvedNfraContent) {
+          ({ body, contentType, fileName } = resolvedNfraContent);
+        } else {
+          const response = await robustFetch(targetUrl, {
+            timeout: fetchTimeout(env),
+            maxAttempts: fetchMaxAttempts(env),
+          });
 
-        if (!response.ok) {
-          return errorResponse(env, `Failed to fetch URL: ${response.status} ${response.statusText}`, 502);
+          if (!response.ok) {
+            return errorResponse(env, `Failed to fetch URL: ${response.status} ${response.statusText}`, 502);
+          }
+
+          contentType = response.headers.get('content-type') || 'application/octet-stream';
+          body = await response.arrayBuffer();
+          fileName = getFileName(targetUrl);
         }
-
-        contentType = response.headers.get('content-type') || 'application/octet-stream';
-        body = await response.arrayBuffer();
-        fileName = getFileName(targetUrl);
 
         // For HTML content: extract title first, then process content
         if (isHtmlContent(contentType)) {
